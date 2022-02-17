@@ -1,18 +1,32 @@
-locals {
-  bucket_name             = "origin-s3-bucket-${random_pet.this.id}"
-  destination_bucket_name = "replica-s3-bucket-${random_pet.this.id}"
-  origin_region           = "eu-west-1"
-  replica_region          = "eu-central-1"
-}
-
 provider "aws" {
   region = local.origin_region
+
+  # Make it faster by skipping something
+  skip_get_ec2_platforms      = true
+  skip_metadata_api_check     = true
+  skip_region_validation      = true
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
 }
 
 provider "aws" {
   region = local.replica_region
 
   alias = "replica"
+
+  # Make it faster by skipping something
+  skip_get_ec2_platforms      = true
+  skip_metadata_api_check     = true
+  skip_region_validation      = true
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+}
+
+locals {
+  bucket_name             = "origin-s3-bucket-${random_pet.this.id}"
+  destination_bucket_name = "replica-s3-bucket-${random_pet.this.id}"
+  origin_region           = "eu-west-1"
+  replica_region          = "eu-central-1"
 }
 
 data "aws_caller_identity" "current" {}
@@ -82,6 +96,14 @@ module "s3_bucket" {
           account_id         = data.aws_caller_identity.current.account_id
           access_control_translation = {
             owner = "Destination"
+          }
+          replication_time = {
+            status  = "Enabled"
+            minutes = 15
+          }
+          metrics = {
+            status  = "Enabled"
+            minutes = 15
           }
         }
       },

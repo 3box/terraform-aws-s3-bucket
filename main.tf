@@ -1,5 +1,5 @@
 locals {
-  attach_policy = var.attach_elb_log_delivery_policy || var.attach_lb_log_delivery_policy || var.attach_deny_insecure_transport_policy || var.attach_policy
+  attach_policy = var.attach_require_latest_tls_policy || var.attach_elb_log_delivery_policy || var.attach_lb_log_delivery_policy || var.attach_deny_insecure_transport_policy || var.attach_policy
 }
 
 resource "aws_s3_bucket" "this" {
@@ -132,10 +132,11 @@ resource "aws_s3_bucket" "this" {
         for_each = replication_configuration.value.rules
 
         content {
-          id       = lookup(rules.value, "id", null)
-          priority = lookup(rules.value, "priority", null)
-          prefix   = lookup(rules.value, "prefix", null)
-          status   = rules.value.status
+          id                               = lookup(rules.value, "id", null)
+          priority                         = lookup(rules.value, "priority", null)
+          prefix                           = lookup(rules.value, "prefix", null)
+          delete_marker_replication_status = lookup(rules.value, "delete_marker_replication_status", null)
+          status                           = rules.value.status
 
           dynamic "destination" {
             for_each = length(keys(lookup(rules.value, "destination", {}))) == 0 ? [] : [lookup(rules.value, "destination", {})]
@@ -151,6 +152,24 @@ resource "aws_s3_bucket" "this" {
 
                 content {
                   owner = access_control_translation.value.owner
+                }
+              }
+
+              dynamic "replication_time" {
+                for_each = length(keys(lookup(destination.value, "replication_time", {}))) == 0 ? [] : [lookup(destination.value, "replication_time", {})]
+
+                content {
+                  status  = replication_time.value.status
+                  minutes = replication_time.value.minutes
+                }
+              }
+
+              dynamic "metrics" {
+                for_each = length(keys(lookup(destination.value, "metrics", {}))) == 0 ? [] : [lookup(destination.value, "metrics", {})]
+
+                content {
+                  status  = metrics.value.status
+                  minutes = metrics.value.minutes
                 }
               }
             }
@@ -256,6 +275,7 @@ data "aws_iam_policy_document" "combined" {
   source_policy_documents = compact([
     var.attach_elb_log_delivery_policy ? data.aws_iam_policy_document.elb_log_delivery[0].json : "",
     var.attach_lb_log_delivery_policy ? data.aws_iam_policy_document.lb_log_delivery[0].json : "",
+    var.attach_require_latest_tls_policy ? data.aws_iam_policy_document.require_latest_tls[0].json : "",
     var.attach_deny_insecure_transport_policy ? data.aws_iam_policy_document.deny_insecure_transport[0].json : "",
     var.attach_policy ? var.policy : ""
   ])
@@ -371,15 +391,65 @@ data "aws_iam_policy_document" "deny_insecure_transport" {
   }
 }
 
+data "aws_iam_policy_document" "require_latest_tls" {
+  count = var.create_bucket && var.attach_require_latest_tls_policy ? 1 : 0
+
+  statement {
+    sid    = "denyOutdatedTLS"
+    effect = "Deny"
+
+    actions = [
+      "s3:*",
+    ]
+
+    resources = [
+      aws_s3_bucket.this[0].arn,
+      "${aws_s3_bucket.this[0].arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "NumericLessThan"
+      variable = "s3:TlsVersion"
+      values = [
+        "1.2"
+      ]
+    }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "this" {
   count = var.create_bucket && var.attach_public_policy ? 1 : 0
 
   # Chain resources (s3_bucket -> s3_bucket_policy -> s3_bucket_public_access_block)
   # to prevent "A conflicting conditional operation is currently in progress against this resource."
+  # Ref: https://github.com/hashicorp/terraform-provider-aws/issues/7628
+
   bucket = local.attach_policy ? aws_s3_bucket_policy.this[0].id : aws_s3_bucket.this[0].id
 
   block_public_acls       = var.block_public_acls
   block_public_policy     = var.block_public_policy
   ignore_public_acls      = var.ignore_public_acls
   restrict_public_buckets = var.restrict_public_buckets
+}
+
+resource "aws_s3_bucket_ownership_controls" "this" {
+  count = var.create_bucket && var.control_object_ownership ? 1 : 0
+
+  bucket = local.attach_policy ? aws_s3_bucket_policy.this[0].id : aws_s3_bucket.this[0].id
+
+  rule {
+    object_ownership = var.object_ownership
+  }
+
+  # This `depends_on` is to prevent "A conflicting conditional operation is currently in progress against this resource."
+  depends_on = [
+    aws_s3_bucket_policy.this,
+    aws_s3_bucket_public_access_block.this,
+    aws_s3_bucket.this
+  ]
 }
